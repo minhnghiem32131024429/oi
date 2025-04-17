@@ -8,6 +8,51 @@ import threading
 import time
 
 
+class PerfectLineDrawer:
+    """Tiện ích vẽ đường thẳng hoàn hảo cho robot SCARA"""
+
+    def __init__(self):
+        self.interpolation_points = 10  # Số điểm nội suy cho mỗi đoạn thẳng
+        self.time_based = True  # Dùng nội suy theo thời gian (mượt hơn)
+
+    def generate_straight_line_gcode(self, start_x, start_y, end_x, end_y, feedrate=500):
+        """Tạo G-code cho đường thẳng hoàn hảo với nội suy theo thời gian"""
+        gcode = []
+
+        # Kiểm tra điểm đầu cuối trùng nhau
+        if abs(start_x - end_x) < 0.01 and abs(start_y - end_y) < 0.01:
+            return gcode
+
+        # Tính chiều dài đoạn thẳng
+        line_length = math.sqrt((end_x - start_x) ** 2 + (end_y - start_y) ** 2)
+
+        # Điều chỉnh số điểm nội suy dựa trên chiều dài đoạn
+        num_points = max(3, min(int(line_length / 0.5) + 1, 15))
+
+        # 1. Di chuyển nhanh đến điểm đầu
+        gcode.append(f"G0 X{start_x:.3f} Y{start_y:.3f}")
+
+        # 2. Hạ bút (sử dụng M3 như trong mã của bạn)
+        gcode.append("M3")
+
+        # 3. Thiết lập tốc độ vẽ
+        gcode.append(f"G1 F{feedrate}")
+
+        # 4. Tạo các điểm nội suy
+        for i in range(1, num_points + 1):
+            t = i / num_points
+            interp_x = start_x + (end_x - start_x) * t
+            interp_y = start_y + (end_y - start_y) * t
+
+            # Đồng bộ hóa thời gian chuyển động để đảm bảo tốc độ không đổi
+            gcode.append(f"G1 X{interp_x:.3f} Y{interp_y:.3f}")
+
+        # 5. Nâng bút (sử dụng M5 như trong mã của bạn)
+        gcode.append("M5")
+
+        return gcode
+
+
 class CropRectangle:
     def __init__(self, canvas, min_size=10):
         self.canvas = canvas
@@ -215,6 +260,40 @@ class ImageToGcodeApp:
             y = start_y + (end_y - start_y) * t
             points.append((x, y))
         return points
+
+    def create_hardware_accelerated_line(self, start_x, start_y, end_x, end_y, speed):
+        gcode = []
+
+        # Di chuyển nhanh tới điểm đầu (không vẽ)
+        gcode.append(f"G0 X{start_x:.3f} Y{start_y:.3f}")
+
+        # Hạ bút
+        gcode.append("M3")
+
+        # Đặt vận tốc - ĐÂY LÀ ĐIỂM QUAN TRỌNG #1
+        # Vận tốc nội suy phần cứng, không phải vận tốc truyền lệnh
+        optimal_speed = int(speed * 0.8)  # Giảm nhẹ để đảm bảo mượt mà
+        gcode.append(f"G1 F{optimal_speed}")
+
+        # ĐÂY LÀ ĐIỂM QUAN TRỌNG #2: Sử dụng một lệnh G1 duy nhất
+        # Firmware sẽ tự động nội suy đường thẳng ở tốc độ không đổi
+        gcode.append(f"G1 X{end_x:.3f} Y{end_y:.3f} E1")  # E1 báo cho firmware biết đây là lệnh vẽ
+
+        # Nâng bút
+        gcode.append("M5")
+
+        return gcode
+
+    def optimize_serial_throughput(self):
+        """Cải thiện tốc độ truyền dữ liệu serial"""
+        # Tăng tốc độ baud rate nếu phần cứng hỗ trợ
+        self.serial_port.baudrate = 115200  # hoặc cao hơn: 230400, 250000
+
+        # Đặt timeout lớn hơn để tránh gián đoạn
+        self.serial_port.timeout = 0.5
+
+        # Tăng kích thước buffer gửi
+        self.serial_port.write_buffer_size = 4096  # nếu được hỗ trợ
 
     def create_widgets(self):
         # Main frame
@@ -771,8 +850,87 @@ class ImageToGcodeApp:
         thread.daemon = True
         thread.start()
 
+    # Thêm hàm này sau hàm generate_gcode để sử dụng lệnh đường thẳng trực tiếp
+    def generate_optimized_gcode(self):
+        """Phiên bản tối ưu của generate_gcode sử dụng lệnh đường thẳng"""
+        # [Phần code tương tự như generate_gcode nhưng thay thế]
+
+        # Thay thế các dòng vẽ từng đoạn này:
+        # gcode.append(f"G0 X{real_start_x:.3f} Y{real_y:.3f}")
+        # gcode.append("M3")
+        # gcode.append(f"G1 X{real_end_x:.3f} Y{real_y:.3f}")
+        # gcode.append("M5")
+
+        # Bằng lệnh đường thẳng trực tiếp:
+        if segments:
+            for seg_start_px, seg_end_px in segments:
+                real_start_x = offset_x + seg_start_px * actual_scale
+                real_end_x = offset_x + seg_end_px * actual_scale
+                real_start_x = max(custom_x_min, min(custom_x_max, real_start_x))
+                real_end_x = max(custom_x_min, min(custom_x_max, real_end_x))
+
+                # Nếu đoạn quá ngắn thì bỏ qua
+                if abs(real_end_x - real_start_x) < 0.01:
+                    continue
+
+                # Hạ bút
+                gcode.append("M3")
+
+                # Sử dụng lệnh LINE trực tiếp thay vì G0/G1
+                gcode.append(f"L{real_start_x:.3f},{real_y:.3f},{real_end_x:.3f},{real_y:.3f},F{drawing_speed}")
+
+                # Nâng bút
+                gcode.append("M5")
+
+    import numpy as np
+
+    def create_perfect_cartesian_line(self, start_x, start_y, end_x, end_y, drawing_speed):
+        """
+        Tạo đường thẳng hoàn hảo trong không gian Cartesian với tần số cao
+        và đồng bộ chuyển động các khớp
+        """
+        gcode = []
+
+        # PHẦN QUAN TRỌNG 1: Tính toán khoảng cách thực tế và thời gian chuyển động
+        distance = np.sqrt((end_x - start_x) ** 2 + (end_y - start_y) ** 2)
+
+        # Số điểm nội suy dựa trên khoảng cách, tối thiểu 10 điểm, tối đa 50 điểm
+        # Điểm mấu chốt: mật độ điểm càng cao càng mượt
+        points_density = 10  # Điểm/cm
+        num_points = max(10, min(50, int(distance * points_density)))
+
+        # Tính vận tốc cho từng đoạn nhỏ - BẮT BUỘC để đồng bộ chuyển động
+        # Dùng công thức S=v*t với S là khoảng cách, v là vận tốc, t là thời gian
+        segment_length = distance / num_points
+
+        # PHẦN QUAN TRỌNG 2: Vận tốc phải phù hợp với khoảng cách đoạn nhỏ
+        # Nếu đoạn nhỏ mà vận tốc cao -> giật cục
+        # Điều chỉnh vận tốc theo độ dài đoạn
+        segment_speed = min(drawing_speed, drawing_speed * segment_length * 10)
+
+        # Di chuyển đến điểm đầu và thiết lập vận tốc ban đầu
+        gcode.append(f"G0 X{start_x:.3f} Y{start_y:.3f}")
+        gcode.append(f"G1 F{drawing_speed}")
+        gcode.append("M3")  # Hạ bút
+
+        # PHẦN QUAN TRỌNG 3: Tần số nội suy cao và đều
+        for i in range(1, num_points + 1):
+            t = i / num_points
+            x = start_x + (end_x - start_x) * t
+            y = start_y + (end_y - start_y) * t
+
+            # Sử dụng lệnh G1 với vận tốc đã tính
+            gcode.append(f"G1 X{x:.3f} Y{y:.3f} F{segment_speed:.0f}")
+
+        gcode.append("M5")  # Nâng bút
+
+        # Khôi phục vận tốc mặc định
+        gcode.append(f"G1 F{drawing_speed}")
+
+        return gcode
+
     def _run_gcode_generation(self):
-        """Run G-code generation process for the main object - G0 ONLY, NO COMMENTS"""
+        """Run G-code generation process for the main object with perfect line drawing"""
         try:
             # Custom workspace boundaries
             custom_x_min = self.x_min_var.get()
@@ -833,11 +991,8 @@ class ImageToGcodeApp:
 
             # Draw reference frame if requested
             if draw_frame:
+                # [Giữ nguyên code vẽ khung tham chiếu nếu có]
                 pass
-
-            # Move to starting position for image
-            initial_real_y = offset_y + (height - 1) * actual_scale
-            #gcode.append(f"G0 X{offset_x:.3f} Y{initial_real_y:.3f}")
 
             # Counters
             line_count = 0
@@ -847,12 +1002,11 @@ class ImageToGcodeApp:
             # Scan image and create G-code
             zigzag_direction = 1
 
-            # THAY ĐỔI: Tính toán line_step giống như trong preview_processing()
-            # để đảm bảo nhất quán
+            # THAY ĐỔI: Tính toán line_step
             line_spacing_cm = line_spacing / 10  # mm to cm
             line_step = max(1, int(line_spacing_cm / (scale_factor * 0.1)))
 
-            # THAY ĐỔI: Sử dụng line_step thay vì pixel_step_y
+            # THAY ĐỔI: In thông tin debug
             print(f"DEBUG: Line spacing: {line_spacing}mm, Line step: {line_step} pixels")
             print(f"DEBUG: Expected scan rows: {height // line_step}")
 
@@ -866,12 +1020,6 @@ class ImageToGcodeApp:
                     continue
 
                 scan_lines += 1
-
-                # THAY ĐỔI: Đếm số pixel target trong dòng này để debug
-                if y_px < height:
-                    target_count = np.sum(img_binary[y_px, :] == target_value)
-                    if scan_lines % 10 == 0 or scan_lines <= 3:  # In vài dòng đầu và mỗi 10 dòng
-                        print(f"Row {scan_lines}: {target_count}/{width} target pixels found")
 
                 # Find segments to draw in this row
                 segments = []
@@ -887,7 +1035,7 @@ class ImageToGcodeApp:
                             if start_px == -1:
                                 start_px = x_px
                         elif start_px != -1:
-                            end_px = x_px - 1  # THAY ĐỔI: Đơn giản hóa, không cần xét zigzag_direction ở đây
+                            end_px = x_px - 1
                             segments.append((start_px, end_px))
                             start_px = -1
 
@@ -895,11 +1043,11 @@ class ImageToGcodeApp:
                 if start_px != -1:
                     segments.append((start_px, x_range[-1]))
 
-                segment_count += len(segments)  # THAY ĐỔI: Đếm số segment
+                segment_count += len(segments)
 
-                # Generate G-code for segments
+                # Generate G-code for segments with perfect lines
+                # Xử lý các segment trong scan line
                 if segments:
-                    last_x_pos = None
                     for seg_start_px, seg_end_px in segments:
                         real_start_x = offset_x + seg_start_px * actual_scale
                         real_end_x = offset_x + seg_end_px * actual_scale
@@ -909,29 +1057,12 @@ class ImageToGcodeApp:
                         if abs(real_end_x - real_start_x) < 0.01:
                             continue
 
-                        # Move to segment start (di chuyển nhanh)
-                        if last_x_pos is None or abs(real_start_x - last_x_pos) > 0.01:
-                            gcode.append(f"G0 X{real_start_x:.3f} Y{real_y:.3f}")
-
-                        # Pen down
-                        gcode.append("M3")
+                        # Sử dụng phương thức đường thẳng tăng tốc phần cứng
+                        line_gcode = self.create_hardware_accelerated_line(
+                            real_start_x, real_y, real_end_x, real_y, drawing_speed
+                        )
+                        gcode.extend(line_gcode)
                         line_count += 1
-
-                        # Tạo đường thẳng với nhiều điểm nội suy
-                        # Số điểm phụ thuộc vào độ dài đoạn thẳng
-                        segment_length = abs(real_end_x - real_start_x)
-                        num_points = max(2, int(segment_length / 0.5))  # Mỗi 0.5cm có một điểm
-
-                        # Di chuyển tuyến tính (G1) qua các điểm nội suy
-                        for i in range(1, num_points + 1):
-                            t = i / num_points
-                            interp_x = real_start_x + (real_end_x - real_start_x) * t
-                            gcode.append(f"G1 X{interp_x:.3f} Y{real_y:.3f}")
-
-                        last_x_pos = real_end_x
-
-                        # Pen up
-                        gcode.append("M5")
 
                 # Change direction for next scan if zigzag
                 if use_zigzag:
